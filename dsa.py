@@ -1,31 +1,33 @@
 #!/usr/bin/env python3
-"""Data science agent: a notebook-based coding agent powered by Kimi K3.1 Pro.
+"""Data science agent: an append-only notebook for computational research.
 
 The model reads, writes and edits files by writing Python itself. There are
 no separate file, shell or background-command tools. Imports, variables,
 functions and the working directory persist between calls; a timeout restarts
 the interpreter. Execution is deliberately unsandboxed.
 
-Endpoint, credentials and Kimi's ``temperature=1`` requirement come from
-inference-db entry ``kimi-coding``.
+The model is served by an OpenAI-compatible Chat Completions API. Configure
+``DSA_MODEL``, ``DSA_BASE_URL`` and ``DSA_API_KEY``. No provider-specific
+inference database is used.
 
 Usage:
-    dsa-agent "<task>"           # one-shot
-    dsa-agent                    # interactive REPL
-    dsa-agent --session <id>     # resume a session
-    dsa-agent --non-interactive  # disable questions
-    echo "<task>" | dsa-agent    # task on stdin
+    dsa "<task>"           # one-shot
+    dsa                    # interactive REPL
+    dsa --session <id>     # resume a session
+    dsa --non-interactive  # disable questions
+    echo "<task>" | dsa    # task on stdin
 
 Every session is maintained as a valid Jupyter notebook. New sessions use a
 ``.ipynb`` file beside the JSONL transcript; resumed sessions use
 ``<session_id>.ipynb`` beside agentknit's snapshot. Prompts and assistant
 replies become Markdown cells; each Python call becomes a code cell with its
-stdout/stderr. Use ``--notebook`` to print the path at startup, or
+stdout/stderr. Use ``--print-notebook`` to print the path at startup, or
 ``--notebook <path>`` for an explicit location.
 """
 
 from __future__ import annotations
 
+import argparse
 import copy
 import json
 import os
@@ -38,9 +40,22 @@ from typing import Any
 import agentknit
 from agentknit.tool_library import TOOL_LIBRARY
 
-MODEL = "k3.1-pro"
-INFERENCE_DB = "kimi-coding"
+DEFAULT_BASE_URL = "http://localhost:8000/v1"
 PYTHON_TIMEOUT_SECONDS = 120
+
+
+def _parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="dsa", description="Data science agent with append-only Jupyter sessions")
+    parser.add_argument("task", nargs="*", help="one-shot task; omit for interactive mode")
+    parser.add_argument("--session", help="resume a session")
+    parser.add_argument("--non-interactive", action="store_true", help="disable questions")
+    parser.add_argument("--notebook", metavar="PATH",
+                        help="write the notebook to PATH (default: session directory)")
+    parser.add_argument("--print-notebook", action="store_true",
+                        help="print the notebook path at startup")
+    return parser
+
 
 _home = os.path.expanduser("~")
 _cwd = os.getcwd()
@@ -83,7 +98,7 @@ class _NotebookSink:
 
     def __init__(self, path: str | os.PathLike[str] | None = None, *,
                  requested: bool = False, replay: list[dict[str, Any]] | None = None,
-                 model: str = MODEL) -> None:
+                 model: str = "default") -> None:
         self.path = os.fspath(path) if path is not None else None
         self.requested = requested
         self._model = model
@@ -219,7 +234,7 @@ class _NotebookSink:
 
     def append(self, record: dict[str, Any]) -> None:
         kind = record.get("type")
-        if kind == "message" and self.path is None:
+        if kind == "message" and not self._bound:
             message = record.get("msg") or {}
             if message.get("role") == "system":
                 match = re.search(r"Session: ([^\s]+)", str(message.get("content", "")))
@@ -452,66 +467,43 @@ def configure_tools(schema: dict[str, Any]) -> None:
 
 def main() -> None:
     """Dispatch a one-shot task, stdin task, or interactive agent REPL."""
+    args = _parser().parse_args()
     os.environ["AGENTKNIT_RESUME_COMMAND"] = sys.argv[0]
 
-    schema = agentknit.load_specification(MODEL, inference_db=INFERENCE_DB)
+    model = os.environ.get("DSA_MODEL")
+    if not model:
+        _parser().error("DSA_MODEL must name the model served by DSA_BASE_URL")
+    schema = agentknit.load_specification(
+        model, os.environ.get("DSA_BASE_URL", DEFAULT_BASE_URL))
+    schema["key_env"] = "DSA_API_KEY"
     schema["display_name"] = "Data science agent"
-    schema["context_window"] = 1_048_576
-    schema["compaction_trigger_tokens"] = 786_432
+    schema["context_window"] = int(os.environ.get("DSA_CONTEXT_WINDOW", "131072"))
+    schema["compaction_trigger_tokens"] = schema["context_window"] * 3 // 4
     configure_tools(schema)
 
-    non_interactive = "--non-interactive" in sys.argv
-    session_id = None
-    if "--session" in sys.argv:
-        index = sys.argv.index("--session")
-        if index + 1 < len(sys.argv):
-            session_id = sys.argv[index + 1]
-
-    notebook = _notebook_arg(sys.argv[1:])
     replay: list[dict[str, Any]] | None = None
-    if session_id:
+    if args.session:
         from agentknit._core import _load_messages_snapshot
-        messages = _load_messages_snapshot(MODEL, session_id) or []
+        messages = _load_messages_snapshot(model, args.session) or []
         replay = [{"type": "message", "msg": message} for message in messages]
-    notebook_sink = _NotebookSink(notebook if isinstance(notebook, str) else None,
-                                  requested=notebook is True, replay=replay)
-    if session_id and not isinstance(notebook, str):
+    notebook_path = args.notebook
+    notebook_sink = _NotebookSink(notebook_path, requested=args.print_notebook,
+                                  replay=replay, model=model)
+    if args.session and not notebook_path:
         from agentknit._core import _snapshot_path
-        snapshot = _snapshot_path(MODEL, session_id)
+        snapshot = _snapshot_path(model, args.session)
         # Resume opens a new transcript, but the notebook remains the
         # single canonical document for the whole session id.
-        notebook_sink.bind(os.path.join(os.path.dirname(str(snapshot)), session_id + ".ipynb"),
-                           session_id)
+        notebook_sink.bind(os.path.join(os.path.dirname(str(snapshot)),
+                                        args.session + ".ipynb"), args.session)
 
-    flags_with_value = {"--session"}
-    flags_with_optional_value = {"--notebook"}
-    task_args: list[str] = []
-    skip_next = False
-    arguments = sys.argv[1:]
-    for index, argument in enumerate(arguments):
-        if skip_next:
-            skip_next = False
-            continue
-        if argument in flags_with_value:
-            skip_next = True
-            continue
-        if argument in flags_with_optional_value:
-            if (index + 1 < len(arguments)
-                    and not arguments[index + 1].startswith("--")
-                    and arguments[index + 1].endswith(".ipynb")):
-                skip_next = True
-            continue
-        if argument.startswith("--"):
-            continue
-        task_args.append(argument)
-
-    task = " ".join(task_args) if task_args else None
+    task = " ".join(args.task) if args.task else None
     common = dict(
-        non_interactive=non_interactive,
-        session_id=session_id,
+        non_interactive=args.non_interactive,
+        session_id=args.session,
         system_prompt_supplement=_SUPPLEMENT,
-        min_cacheable_tokens=4096,
-        cache_ttl_seconds=300,
+        min_cacheable_tokens=0,
+        cache_ttl_seconds=int(os.environ.get("DSA_CACHE_TTL_SECONDS", "300")),
         durable_sink=notebook_sink,
     )
     try:

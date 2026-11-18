@@ -11,11 +11,11 @@ from pathlib import Path
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-FACE = REPO_ROOT / "agent_kimi_k3_1_python_repl.py"
+FACE = REPO_ROOT / "dsa.py"
 
 
 def load_face():
-    spec = importlib.util.spec_from_file_location("face_kimi_k3_1_python_repl", FACE)
+    spec = importlib.util.spec_from_file_location("face_dsa", FACE)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = module
@@ -26,6 +26,7 @@ def load_face():
 @pytest.fixture
 def face(monkeypatch: pytest.MonkeyPatch):
     module = load_face()
+    monkeypatch.setenv("DSA_MODEL", "test-model")
     monkeypatch.setattr(module.agentknit, "run_repl", lambda *args, **kwargs: None)
     yield module
     module._reset_interpreter()
@@ -46,8 +47,9 @@ def test_face_exposes_only_one_python_tool_for_all_file_operations(face, monkeyp
 
     schema = captured["args"][0]
     assert captured["args"][1] == "say ok"
-    assert schema["model"] == "k3.1-pro"
-    assert schema["inference_db"] == "kimi-coding"
+    assert schema["model"] == "test-model"
+    assert schema["endpoint"] == "http://localhost:8000/v1"
+    assert schema["key_env"] == "DSA_API_KEY"
     assert schema["tools"] == ["t_python"]
     assert len(schema["tool_specs"]) == 1
     tool = schema["tool_specs"][0]["function"]
@@ -58,7 +60,7 @@ def test_face_exposes_only_one_python_tool_for_all_file_operations(face, monkeyp
     assert "write" in description
     assert "edit" in description
     assert "files" in description
-    assert captured["kwargs"]["min_cacheable_tokens"] == 4096
+    assert captured["kwargs"]["min_cacheable_tokens"] == 0
     assert captured["kwargs"]["cache_ttl_seconds"] == 300
 
 
@@ -243,7 +245,7 @@ def test_notebook_arguments_and_main_wiring(face, monkeypatch, tmp_path):
     assert face._notebook_arg(["--notebook"]) is True
     assert face._notebook_arg(["--notebook", "x.ipynb"]) == "x.ipynb"
     captured = capture_task(face, monkeypatch)
-    monkeypatch.setattr(sys, "argv", [FACE.name, "--notebook", "run", "task"])
+    monkeypatch.setattr(sys, "argv", [FACE.name, "--print-notebook", "run", "task"])
     face.main()
     assert captured["args"][1] == "run task"
     assert isinstance(captured["kwargs"]["durable_sink"], face._NotebookSink)
@@ -256,7 +258,7 @@ def test_real_agent_session_updates_notebook_after_each_step(face, tmp_path, mon
     path = tmp_path / "session.ipynb"
     sink = face._NotebookSink(path)
     schema = {
-        "model": face.MODEL, "endpoint": "http://unused.invalid", "tool_specs": [],
+        "model": "default", "endpoint": "http://unused.invalid", "tool_specs": [],
         "tools": [], "inferred_tool_schema": [], "tool_dispatch": {},
         "behaviour": {"call_delivery_mode": "structured_tool_calls"},
     }
@@ -284,7 +286,7 @@ def test_default_notebook_path_uses_system_session_identity(face, tmp_path, monk
     sink.append({"type": "message", "msg": {"role": "system",
         "content": "Session: abc123 (transcript: unused)"}})
     sink.append({"type": "message", "msg": {"role": "user", "content": "Hello"}})
-    expected = log_root / face.MODEL / __import__("datetime").datetime.now().strftime("%Y-%m-%d")
+    expected = log_root / "default" / __import__("datetime").datetime.now().strftime("%Y-%m-%d")
     notebooks = list(expected.glob("*_abc123.ipynb"))
     assert len(notebooks) == 1
     notebook = json.loads(notebooks[0].read_text())
@@ -300,3 +302,42 @@ def test_awareness_footer_is_not_part_of_notebook_prompt(face, tmp_path):
     text = "".join(json.loads(path.read_text())["cells"][-1]["source"])
     assert "Question" in text
     assert "session_time" not in text
+
+def test_project_has_no_provider_specific_names():
+    forbidden = "ki" + "mi"
+    assert (REPO_ROOT / "dsa.py").exists()
+    assert not list(REPO_ROOT.glob("*" + forbidden + "*"))
+    for path in REPO_ROOT.rglob("*"):
+        if any(part in {".git", ".venv", ".pytest_cache", "__pycache__"}
+               for part in path.parts):
+            continue
+        if path.is_file():
+            assert forbidden not in path.name.lower()
+            if path.suffix in {".md", ".toml", ".yml"}:
+                assert forbidden not in path.read_text().lower()
+    source = (REPO_ROOT / "dsa.py").read_text().lower()
+    assert forbidden not in source
+
+
+def test_generic_chat_completions_configuration(face, monkeypatch):
+    monkeypatch.setenv("DSA_MODEL", "test-model")
+    monkeypatch.setenv("DSA_BASE_URL", "https://llm.example/v1")
+    monkeypatch.setenv("DSA_API_KEY", "secret")
+    monkeypatch.setattr(face.agentknit, "load_specification", lambda *args, **kwargs: {
+        "model": args[0], "endpoint": args[1], "key_env": "DSA_API_KEY",
+    })
+    captured = capture_task(face, monkeypatch)
+    monkeypatch.setattr(sys, "argv", [FACE.name, "analyze"])
+    face.main()
+    schema = captured["args"][0]
+    assert schema["model"] == "test-model"
+    assert schema["endpoint"] == "https://llm.example/v1"
+    assert schema["key_env"] == "DSA_API_KEY"
+    assert "inference_db" not in schema
+    assert schema["display_name"] == "Data science agent"
+
+
+def test_installed_command_is_dsa():
+    project = (REPO_ROOT / "pyproject.toml").read_text()
+    assert '"dsa" = "dsa:main"' in project
+    assert '"dsa-agent" = ' not in project

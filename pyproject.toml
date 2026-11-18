@@ -24,14 +24,14 @@ dev = [
 ]
 
 [project.scripts]
-"dsa-agent" = "agent_kimi_k3_1_python_repl:main"
+"dsa" = "dsa:main"
 
 [project.urls]
 Homepage = "https://github.com/ASSERT-KTH/dsa-agent"
 Repository = "https://github.com/ASSERT-KTH/dsa-agent"
 
 [tool.hatch.build.targets.wheel]
-only-include = ["agent_kimi_k3_1_python_repl.py"]
+only-include = ["dsa.py"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

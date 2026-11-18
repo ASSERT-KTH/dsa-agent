@@ -12,35 +12,42 @@ rewritten by the agent; subsequent work is appended with new outputs.
 ## Requirements
 
 - Python 3.11 or newer
-- a Kimi Coding Plan API key in the system keyring:
+- an OpenAI-compatible Chat Completions API server
 
 ```bash
-keyring set login2 kimi_api_key
+export DSA_MODEL="your-model"
+export DSA_BASE_URL="http://localhost:8000/v1"
+export DSA_API_KEY="your-key"
 ```
 
-The agent uses `agentknit` and its `kimi-coding` inference configuration.
+The agent uses `agentknit` to talk to the configured server. It has no
+provider-specific configuration.
 
 ## Run
 
 ```bash
 uv venv
 uv pip install -e '.[dev]'
-.venv/bin/dsa-agent "Explore the dataset in data.csv"
+.venv/bin/dsa "Explore the dataset in data.csv"
 ```
 
 Interactive mode starts when no task is supplied:
 
 ```bash
-.venv/bin/dsa-agent
+.venv/bin/dsa
 ```
 
 Useful options:
 
 ```bash
-.venv/bin/dsa-agent --session <id>       # resume a session
-.venv/bin/dsa-agent --non-interactive   # disable questions
-.venv/bin/dsa-agent --notebook          # print the notebook path
-.venv/bin/dsa-agent --notebook out.ipynb "Analyze data.csv"
+.venv/bin/dsa --session <id>       # resume a session
+.venv/bin/dsa --non-interactive   # disable questions
+.venv/bin/dsa --print-notebook    # print the notebook path
+.venv/bin/dsa --notebook out.ipynb "Analyze data.csv"
+```
+
+The optional `DSA_CONTEXT_WINDOW` sets the model context size (default 131072),
+and `DSA_CACHE_TTL_SECONDS` sets the prompt-cache lifetime (default 300).
 ```
 
 New sessions store the notebook beside their JSONL transcript. Resumed sessions
